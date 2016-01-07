@@ -1,0 +1,28 @@
+#ifndef AR_SPECTRA_H
+#define AR_SPECTRA_H
+#include <complex>
+typedef std::complex<double> complex;
+
+void arSpectra_HG(const double data[], const unsigned int data_length, double pxx[]);
+
+void testARBurg();
+
+static const int p = 16;
+static const double freqs[] = {70,85,95,100,105,110,130,140,150};
+static const int num_freqs = 9;
+static const int fs = 1000;
+// ToDo: compute this on feature extraction values file load
+static const complex horner_numerators[] = 
+{
+  complex(0.728968627421412,0.684547105928689),
+  complex(-0.637423989748690,0.770513242775789),
+  complex(-0.992114701314478,-0.125333233564304),
+  complex(-0.809016994374948,-0.587785252292473),
+  complex(-0.425779291565073,-0.904827052466020),
+  complex(0.062790519529315,-0.998026728428271),
+  complex(0.876306680043864,0.481753674101714),
+  complex(0.062790519529313,0.998026728428272),
+  complex(0.809016994374948,0.587785252292473)
+};
+
+#endif

@@ -1,0 +1,255 @@
+#include "ros/ros.h"
+#include <stdlib.h>
+#include <cmath>
+#include <complex>
+#include <sstream>
+#include <fstream>
+#include <cstring>
+#include "ar_spectra.h"
+
+#define PI 3.14159265358979
+
+typedef std::complex<double> complex;
+typedef unsigned char BYTE;
+#define SIZE_DOUBLE 8
+#define SIZE_INT 4
+
+// adapted from Max Collard's port of Matlab's pburg
+
+void arBurg ( double a[], double *E, double k[], const double x[], const int nx, const int p )
+{
+    
+    int i = 0;
+    int j = 0;
+    int m = 0;
+    
+    if (p!=16)
+      ROS_ERROR("hardcoded things for order 16!");
+    
+    const int na = p + 1;
+    
+    //double* aprev = mxMalloc(na * sizeof(double));
+    double* aprev = (double*) calloc(na, sizeof(double));
+    
+    // a = 1;
+    a[0] = 1.0;
+    aprev[0] = a[0];
+    for (i = 1; i < p + 1; i++)
+    {
+        a[i] = 0.0;
+        aprev[i] = a[i];
+    }
+    
+    // N = length(x);
+    const int N = nx;
+    double Nd = N;
+    
+    double* ef = (double*) calloc(N, sizeof(double));
+    double* efp = (double*) calloc(N, sizeof(double));
+    double* eb = (double*) calloc(N, sizeof(double));
+    double* ebp = (double*) calloc(N, sizeof(double));
+    
+    *E = 0.0;
+    
+    for (i = 0; i< N; i++)
+    {
+        // ef = x;
+        ef[i] = x[i];
+        efp[i] = ef[i];
+        // eb = x;
+        eb[i] = x[i];
+        ebp[i] = eb[i];
+        // E = x' * x ./ N;
+        E[0] += (x[i] * x[i]) / Nd;
+    }
+    
+    // k = zeros(1, p);
+    for (i = 0; i < p; i++)
+        k[i] = 0.0;
+    
+    for (m = 0; m < p; m ++)
+    {
+        // efp = ef(2:end);
+        int efp_start = m + 1;
+        // ebp = eb(1:end-1);
+        int ebp_end = N - (m + 1);
+        
+        double num = 0.0, den = 0.0;
+        for (i = efp_start, j = 0; i < N && j < ebp_end; i ++, j++)
+        {
+            efp[i] = ef[i];
+            ebp[j] = eb[j];
+            
+            // num = -2 .* ebp' * efp;
+            num += -2.0 * efp[i] * ebp[j];
+            // den = efp' * efp + ebp' * ebp;
+            den += (efp[i] * efp[i]) + (ebp[j] * ebp[j]);
+        }
+        
+        k[m] = num / den;
+
+        for (i = efp_start, j = 0; i < N; i ++, j++)
+        {
+            // ef = efp + k(m) * ebp;
+            ef[i] = efp[i] + k[m] * ebp[j];
+            // eb = ebp + k(m) * efp;
+            eb[j] = ebp[j] + k[m] * efp[i];
+        }
+
+        for (i = 1; i < na; i ++)
+            aprev[i] = a[i];
+
+        a[m + 1] = 0.0;
+        
+        for (i = 1, j = m; i < (m + 2); i++, j--)
+        {
+            // a = [a;0] + k(m) * [0;conj(flipud(a))];
+            a[i] += k[m] * aprev[j];
+        }
+        
+        *E *= (1.0 - (k[m] * k[m]));
+    }
+    
+    free(aprev);
+    
+    free(ef);
+    free(efp);
+    free(eb);
+    free(ebp);
+}
+
+complex horner(complex* p, int np, complex x)
+{
+    complex result = 0.0;
+    int i = 0;
+    
+    for (i = 0; i < np; i ++)
+        result = result * x + p[i];
+    
+    return result;
+}
+
+//double* hImag
+void freqz(double* h, double* a, int na, const double* f, int nf, double Fs)
+{
+    complex* ca = (complex*) calloc(na, sizeof(complex));
+    
+    complex h_complex;
+    double digw;
+    complex s;
+    
+    int i = 0;
+
+    // Get complex copy of filter parameters.
+    for (i = 0; i < na; i++)
+        ca[i] = complex(a[i], 0.0);
+    
+    for (i = 0; i < nf; i ++)
+    {
+        // digw = 2.*pi.*f./Fs;
+        digw = (2.0 * PI / Fs) * f[i];
+        // s = exp(1i * digw);
+        s = exp(complex(0.0, digw));
+        // h = polyval(b,s) ./ polyval(a,s);
+        //h_complex = numerator / horner(ca, na, s);
+        h_complex = horner_numerators[i] / horner(ca, na, s);
+        
+        // Set output matrix.
+        h[i] = real(h_complex)*real(h_complex) + imag(h_complex)*imag(h_complex); //abs(h)^2
+//        ROS_INFO("h[%d]: %f",i,h[i]);
+    }
+    
+    free(ca);
+}
+
+double arSpectra_HG(const double data[],  const unsigned int data_length, double pxx[])
+{
+  // data is what we extract psd from
+  // p is the order of the AR model
+  // data_length is assumed to be a power of 2
+  // freqs is the frequencies to compute PSD at
+  // pxx is the power at the desired frequencies (length = num_freqs, should be preallocated)
+  // fs is the sampling rate
+  
+  double ar_coeffs[p+1]; // coefficients of the AR model
+  double E; // variance of the error for the AR model
+  double k[p]; // I don't really know what this is
+
+  // get the AR coefficients
+  arBurg(ar_coeffs, &E, k, data, data_length, p);
+  
+  // use freqz to get the power spectrum
+  // got rid of b argument (was hardcoded to 1 since AR is an FIR filter)
+  int num_ar_coeffs = p+1; // there are p+1 coeffecients for the AR model
+  for (int ii=0; ii<num_ar_coeffs; ii++)
+   // ROS_INFO("ar_coeffs[%d]: %f",ii,ar_coeffs[ii]);
+
+  freqz(pxx, ar_coeffs, num_ar_coeffs, freqs, num_freqs, fs);
+ // ROS_INFO("E: %.10f",E);
+
+  double sum = 0;
+  for (int ii=0; ii<num_freqs; ii++)
+  {
+    // scale by error variance (E)
+    pxx[ii] *= E;
+    sum += pxx[ii];
+  }
+  
+  return sum;
+}
+
+int bytesToInt(BYTE *bytes,int *index)
+{
+  int result = 0;
+  memcpy(&result,bytes+*index,4);
+  *index += SIZE_INT;
+  return result;
+}
+
+int bytesToChar(BYTE *bytes,int *index)
+{
+  int result = 0;
+  memcpy(&result,bytes+*index,1);
+  *index += 1;
+}
+
+double bytesToDouble(BYTE *bytes, int *index)
+{
+  double result = 0;
+  memcpy(&result,bytes+*index,8);
+  *index += SIZE_DOUBLE;
+  return result;
+}
+
+void testARBurg()
+{
+  // load the test input
+  char fileName[] = "/home/ghotson/Documents/test3.txt";
+  std::streampos fileSize;
+  std::ifstream file(fileName, std::ios::binary);
+
+  file.seekg(0, std::ios::end);
+  fileSize = file.tellg();
+  file.seekg(0, std::ios::beg);
+
+  ROS_INFO("fileSize: %d\n",(int)fileSize);
+  
+  BYTE fileData[(int)fileSize];
+  file.read((char*) &fileData[0], fileSize);
+
+  double data[128];
+  int index = 0;
+  for (int ii=0; ii<128; ii++)
+  {
+    data[ii] = bytesToDouble(fileData,&index);
+  }
+
+  //int num_freqs = 3;
+  double pxx[num_freqs];
+  //double freqs[1] = {11.71875};
+  //double freqs[] = {7,10,13};
+  
+  arSpectra_HG(data,128,pxx);
+  for (int ii=0; ii<num_freqs; ii++)
+    ROS_INFO("pxx[%d] = %.20f",ii,pxx[ii]);
+}

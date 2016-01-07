@@ -1,0 +1,4 @@
+float64[] current_kin
+bool update_timer
+---
+float64[] predicted_kin

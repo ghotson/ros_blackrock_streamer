@@ -1,0 +1,211 @@
+#include "ros/ros.h"
+#include "DMPS.h"
+
+#include <fstream>
+#include <vector>
+#include <cmath>
+
+typedef unsigned char BYTE;
+#define SIZE_INT 4
+#define SIZE_DOUBLE 8
+
+// iterates through selected DMP
+double bytesToDouble(BYTE *bytes, int *index)
+{
+  double result = 0;
+  memcpy(&result,bytes+*index,8);
+  *index += SIZE_DOUBLE;
+  return result;
+}
+
+// iterates through selected DMP
+int bytesToInt(BYTE *bytes,int *index)
+{
+  int result = 0;
+  memcpy(&result,bytes+*index,4);
+  *index += SIZE_INT;
+  return result;
+}
+
+void DMPS::loadDMPCoeffs(const char* fileName)
+{
+  if(sizeof(double) != SIZE_DOUBLE || sizeof(int) != SIZE_INT)
+    ROS_ERROR("double or int isn't sized correctly for parsing");
+
+  // open the file:
+  std::streampos fileSize;
+  std::ifstream file(fileName, std::ios::binary);
+  
+  // get its size:
+  file.seekg(0, std::ios::end);
+  fileSize = file.tellg();
+  file.seekg(0, std::ios::beg);
+
+  // read the data:
+  BYTE fileData[(int)fileSize];
+  file.read((char*) &fileData[0], fileSize);
+
+  // parse the data (format found in google drive doc)
+  int index = 0;
+  
+  num_dmps_ = bytesToInt(fileData,&index);
+  num_centers_ = bytesToInt(fileData,&index);
+  alpha_z_ = bytesToDouble(fileData,&index);
+  beta_z_ = bytesToDouble(fileData,&index);
+  alpha_x_ = bytesToDouble(fileData,&index);
+  tau_ = bytesToDouble(fileData,&index);
+  dt_ = bytesToDouble(fileData,&index);
+  ROS_INFO("overwriting tau");
+  tau_ = .001/dt_;
+
+  action_index_.resize(num_dmps_);
+  kernel_centers_.resize(num_centers_);
+  kernel_variances_.resize(num_centers_);
+  dmp_train_location_.resize( num_dmps_ , std::vector<double>(3) );
+  kernel_weights_x_.resize( num_dmps_ , std::vector<double>(num_centers_) );
+  kernel_weights_y_.resize( num_dmps_ , std::vector<double>(num_centers_) );
+  kernel_weights_z_.resize( num_dmps_ , std::vector<double>(num_centers_) );
+  amp_.resize( num_dmps_, std::vector<double>(3) );
+
+   // left off after dt, now need to read in the kernel params (same for every dmp)
+  for(int kernel_index = 0; kernel_index < num_centers_; kernel_index++)
+  {
+    kernel_centers_[kernel_index] = bytesToDouble(fileData,&index);
+  }
+  for(int kernel_index = 0; kernel_index < num_centers_; kernel_index++)
+  {
+    kernel_variances_[kernel_index] = bytesToDouble(fileData,&index);
+  }
+
+  // now fill in the individual dmp params
+  for(int dmp_index = 0; dmp_index < num_dmps_; dmp_index++)
+  {
+    if ((char)fileData[index] != '\n')
+      ROS_ERROR("parsing got messed up at index: %d!",index);
+    index++;
+
+    action_index_[dmp_index] = bytesToInt(fileData,&index);
+
+    for(int ii=0;ii<3;ii++)
+      dmp_train_location_[dmp_index][ii] = bytesToDouble(fileData,&index);
+
+    for(int kernel_index = 0; kernel_index < num_centers_; kernel_index++)
+    {
+      kernel_weights_x_[dmp_index][kernel_index] = bytesToDouble(fileData,&index);
+    }
+
+    amp_[dmp_index][0] = bytesToDouble(fileData,&index);
+
+    for(int kernel_index = 0; kernel_index < num_centers_; kernel_index++)
+    {
+      kernel_weights_y_[dmp_index][kernel_index] = bytesToDouble(fileData,&index);
+    }
+
+    amp_[dmp_index][1] = bytesToDouble(fileData,&index);
+
+    for(int kernel_index = 0; kernel_index < num_centers_; kernel_index++)
+    {
+      kernel_weights_z_[dmp_index][kernel_index] = bytesToDouble(fileData,&index);
+    }
+
+    amp_[dmp_index][2] = bytesToDouble(fileData,&index);
+  }
+}
+
+// DMPS constuctor
+DMPS::DMPS(const char* fileName)
+{
+  DMPS::loadDMPCoeffs(fileName);
+  kin_.resize(9);
+  Eigen::Map<Eigen::VectorXd> kin_eigen_(kin_.data(),9,1);
+  x_ = 1; // set timer variable
+  active_dmp_ = 0;
+}
+
+std::vector<double> DMPS::getKinematics()
+{
+  return kin_;
+}
+
+void DMPS::setKinematics(std::vector<double> new_kin)
+{
+  kin_ = new_kin;
+}
+
+void DMPS::setKinematics(Eigen::VectorXd new_kin)
+{
+  for (int ii=0; ii<9; ii++)
+    kin_[ii] = new_kin(ii);
+}
+
+void DMPS::setGoal(double goal[])
+{
+  for (int ii=0; ii<3; ii++)
+    this->goal_[ii] = goal[ii];
+}
+
+void DMPS::setActiveDMP(unsigned int active_dmp){this->active_dmp_ = active_dmp;}
+
+void DMPS::resetState()
+{
+  for (int ii=0; ii<3; ii++)
+  {
+    z_[ii] = 0; 
+  }
+  x_ = 1; // resets timer variable
+}
+
+std::vector<double> DMPS::run(bool update_timer)
+{
+  // calculate amplitudes for the kernels
+  double psi[num_centers_];
+  double psi_sum = 1e-10;
+  for (int kernel_index=0; kernel_index<num_centers_; kernel_index++)
+  {
+    double temp = pow(x_-kernel_centers_[kernel_index],2);
+    psi[kernel_index] = exp(-0.5*temp*kernel_variances_[kernel_index]);
+    psi_sum += psi[kernel_index];
+  }
+    
+  // calculate forcing terms for each of the dimensions (hardcoded xyz)
+  double force[3] = {0,0,0};
+  for (int kernel_index=0; kernel_index<num_centers_; kernel_index++)
+  {
+    force[0] += psi[kernel_index] * kernel_weights_x_[active_dmp_][kernel_index];
+    force[1] += psi[kernel_index] * kernel_weights_y_[active_dmp_][kernel_index];
+    force[2] += psi[kernel_index] * kernel_weights_z_[active_dmp_][kernel_index];
+  }
+
+  // loop through each of the dimensions
+  double zd[3];
+  for (int ii=0; ii<3; ii++)
+  {
+    // normalize the force
+    force[ii] = x_*force[ii]/psi_sum * amp_[active_dmp_][ii];
+
+    // incorporate the point attractor into the force
+    zd[ii] = (alpha_z_*(beta_z_*(goal_[ii]-kin_[ii])-z_[ii]) + force[ii])*tau_;
+
+    // update the velocity
+    kin_[ii+3] = z_[ii]*tau_;
+    // update the acc
+    kin_[ii+6] = zd[ii]*tau_;
+
+    // could do smoothing of the goal here (in case it noisily changes position)
+
+    // update z and the position
+    if (update_timer)
+      z_[ii] += zd[ii]*dt_;
+
+    kin_[ii] += kin_[ii+3]*dt_;
+
+  }
+
+    // update the "timer" variable if requested
+    if (update_timer)
+    {
+      double xd = alpha_x_*(-x_)*tau_;
+      x_ += xd*dt_;
+    }
+    return kin_;
+}

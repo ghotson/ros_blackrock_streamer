@@ -1,0 +1,41 @@
+#ifndef OUTPUT_INTERFACE_H
+#define OUTPUT_INTERFACE_H
+
+#include "harmonie_movement_primitives/endpt_prediction.h"
+#include "std_msgs/UInt32.h"
+#include "sensor_msgs/JointState.h"
+#include <vector>
+
+class OutputManager
+{
+  // handles callbacks within the output interface node
+  
+  public:
+    enum LimbType {MPL, JACO, IARM};
+    static const LimbType limb_type_ = MPL;
+    static const bool is_right_arm_ = true;
+    std::vector<double> endpt_offset_ = std::vector<double>(3); //= {0, 0, 0}; // subtracted from the endpt commands
+    static const double reach_scale_ = 1; // multiplier for endpt commands
+    //static const double grasp_speed_[]; = {0.5, 1};
+    bool grasp_state_;
+    std::vector<double> grasp_values_;
+    std::vector<double> joint_values_;
+    std::vector<double> endpt_values_;
+
+    OutputManager();
+
+    ros::NodeHandle n_;
+    void graspCallback(const std_msgs::UInt32::ConstPtr& msg);
+    void endptCallback(const harmonie_movement_primitives::endpt_prediction::ConstPtr& msg);
+    void sendLimbCommand();
+
+  private:
+    ros::Subscriber grasp_sub_;
+    ros::Subscriber endpt_sub_;
+    sensor_msgs::JointState msg_;
+    ros::Publisher command_pub_;
+
+};
+
+
+#endif
