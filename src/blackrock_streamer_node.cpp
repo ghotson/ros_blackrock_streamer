@@ -212,13 +212,13 @@ int main(int argc, char **argv)
     data = (INT16 **)trialcont.samples;
 
     // 4 - forward the data
-    blackrock_interface::blackrock_channel_data br_channel_data; // holds single chan data
     for (UINT32 channel = 0; channel < trialcont.count; channel++)
     {
+      blackrock_interface::blackrock_channel_data br_channel_data; // holds single chan data
       br_channel_data.channel_data.insert(
-      br_channel_data.channel_data.begin(),
-      data[channel],
-      data[channel]+trialcont.num_samples[channel]);
+      	br_channel_data.channel_data.begin(),
+      	data[channel],
+      	data[channel]+trialcont.num_samples[channel]);
 
       br_data_msg.data[channel] = br_channel_data;
       br_data_msg.num_samples[channel] = trialcont.num_samples[channel];
